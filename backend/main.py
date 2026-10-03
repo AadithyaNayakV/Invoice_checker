@@ -21,12 +21,26 @@ import pandas as pd
 try:
     from .reconcile import reconcile_dataframes, calculate_financial_summary
     from .ai_matcher import get_gemini_client, get_model_name
+    from .pdf_parser import parse_pdf_to_dataframe
 except ImportError:
     from reconcile import reconcile_dataframes, calculate_financial_summary
     from ai_matcher import get_gemini_client, get_model_name
+    from pdf_parser import parse_pdf_to_dataframe
 
 
 logger = logging.getLogger("gst_reconcile.api")
+
+
+def load_file_data(filename: str, content: bytes, source_type: str = "PR") -> pd.DataFrame:
+    """Parses uploaded file content as PDF or CSV into a standardized DataFrame."""
+    fname = (filename or "").lower()
+    if fname.endswith(".pdf"):
+        logger.info(f"Parsing uploaded {source_type} PDF: {filename}")
+        return parse_pdf_to_dataframe(content, source_type=source_type)
+    else:
+        logger.info(f"Parsing uploaded {source_type} CSV: {filename}")
+        return pd.read_csv(io.BytesIO(content))
+
 
 app = FastAPI(
     title="GST Reconciliation Tool API",
@@ -66,22 +80,24 @@ def health_check():
 
 @app.post("/api/reconcile")
 async def reconcile_files(
-    pr_file: UploadFile = File(..., description="Purchase Register CSV"),
-    gstr2b_file: UploadFile = File(..., description="GSTR-2B CSV")
+    pr_file: UploadFile = File(..., description="Purchase Register CSV or PDF"),
+    gstr2b_file: UploadFile = File(..., description="GSTR-2B CSV or PDF")
 ):
     """
-    Uploads two CSV files (Purchase Register and GSTR-2B),
+    Uploads two files (Purchase Register and GSTR-2B, in CSV or PDF format),
+    converts PDFs internally as required,
     runs the automated reconciliation pipeline, and returns the financial summary and audited rows.
     """
     try:
         pr_content = await pr_file.read()
         b2_content = await gstr2b_file.read()
 
-        pr_df = pd.read_csv(io.BytesIO(pr_content))
-        b2_df = pd.read_csv(io.BytesIO(b2_content))
+        pr_df = load_file_data(pr_file.filename, pr_content, source_type="PR")
+        b2_df = load_file_data(gstr2b_file.filename, b2_content, source_type="2B")
 
         logger.info(f"Reconciling uploaded files: PR ({len(pr_df)} rows), 2B ({len(b2_df)} rows)")
         reconciled = reconcile_dataframes(pr_df, b2_df)
+
 
         # Store in latest session
         latest_session["summary"] = reconciled["summary"]

@@ -82,13 +82,14 @@ export default function App() {
     }
   };
 
-  // Run reconciliation from uploaded CSVs
+  // Run reconciliation from uploaded CSVs or PDFs
   const handleUploadReconcile = async (e) => {
     e?.preventDefault();
     if (!filePR || !file2B) {
-      setErrorMsg('Please upload both Purchase Register and GSTR-2B CSV files.');
+      setErrorMsg('Please upload both Purchase Register and GSTR-2B files (CSV or PDF).');
       return;
     }
+
 
     setLoading(true);
     setErrorMsg('');
@@ -449,16 +450,16 @@ export default function App() {
               </div>
             </div>
 
-            {/* Custom CSV Upload Zones */}
+            {/* Custom CSV / PDF Upload Zones */}
             <div className="glass-panel p-6 rounded-2xl border border-slate-800 space-y-6">
               <div className="flex items-center space-x-2.5">
                 <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
                   <UploadCloud className="w-4 h-4 text-emerald-400" />
                 </div>
                 <div>
-                  <h2 className="text-base font-semibold text-white">Upload Custom CSV Files</h2>
+                  <h2 className="text-base font-semibold text-white">Upload Custom CSV or PDF Files</h2>
                   <p className="text-xs text-slate-400">
-                    Compare your organization's Purchase Register against GSTR-2B.
+                    Compare your organization's Purchase Register against GSTR-2B (supports CSV, PDF statements, and invoices).
                   </p>
                 </div>
               </div>
@@ -468,7 +469,7 @@ export default function App() {
                 <div className="relative border-2 border-dashed border-slate-700 hover:border-emerald-500/50 rounded-2xl p-6 text-center transition bg-slate-900/40">
                   <input
                     type="file"
-                    accept=".csv"
+                    accept=".csv,.pdf"
                     onChange={(e) => setFilePR(e.target.files[0])}
                     className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
                   />
@@ -482,7 +483,7 @@ export default function App() {
                     <p className="text-xs text-slate-500">
                       {filePR
                         ? `${(filePR.size / 1024).toFixed(1)} KB selected`
-                        : 'Company ERP books (CSV format)'}
+                        : 'Company ERP books (CSV or PDF format)'}
                     </p>
                   </div>
                 </div>
@@ -491,7 +492,7 @@ export default function App() {
                 <div className="relative border-2 border-dashed border-slate-700 hover:border-teal-500/50 rounded-2xl p-6 text-center transition bg-slate-900/40">
                   <input
                     type="file"
-                    accept=".csv"
+                    accept=".csv,.pdf"
                     onChange={(e) => setFile2B(e.target.files[0])}
                     className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
                   />
@@ -505,7 +506,7 @@ export default function App() {
                     <p className="text-xs text-slate-500">
                       {file2B
                         ? `${(file2B.size / 1024).toFixed(1)} KB selected`
-                        : 'Supplier reported filings (CSV format)'}
+                        : 'Supplier reported filings (CSV or PDF format)'}
                     </p>
                   </div>
                 </div>
@@ -521,9 +522,10 @@ export default function App() {
                 }`}
               >
                 <RefreshCw className="w-4 h-4" />
-                <span>Reconcile Uploaded Invoices</span>
+                <span>Reconcile Uploaded Invoices (CSV / PDF)</span>
               </button>
             </div>
+
           </div>
         )}
 
