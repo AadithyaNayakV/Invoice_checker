@@ -29,10 +29,14 @@ def clean_cell(cell: Any) -> str:
     return str(cell).replace("\n", " ").strip()
 
 
-def parse_tables_from_pdf(pdf_stream: io.BytesIO) -> Optional[pd.DataFrame]:
+def parse_tables_from_pdf(pdf_stream: io.BytesIO, source_type: str = "PR") -> Optional[pd.DataFrame]:
     """
-    Attempts to extract structured tables from PDF pages using pdfplumber.
-    Identifies table header rows and maps them to standard columns.
+    Extracts structured tables from ALL pages of a PDF using pdfplumber.
+    Combines tables across all pages, maps columns by header name:
+    GSTIN, Supplier Name, Invoice No, Date, Taxable Value, Rate, CGST, SGST, IGST, Total Tax.
+    Removes commas from numbers before converting to Decimal.
+    Fails loudly if GSTIN or amounts are empty.
+    Prints row counts after reading (expected: purchase register 41 rows, GSTR-2B 39 rows).
     """
     try:
         import pdfplumber
@@ -40,39 +44,135 @@ def parse_tables_from_pdf(pdf_stream: io.BytesIO) -> Optional[pd.DataFrame]:
         logger.warning("pdfplumber not available, falling back to text parsing.")
         return None
 
+    from decimal import Decimal
+
     try:
-        all_rows = []
-        header = None
+        pdf_stream.seek(0)
+        records = []
+        header_indices = {}
 
         with pdfplumber.open(pdf_stream) as pdf:
-            for page in pdf.pages:
+            for page_idx, page in enumerate(pdf.pages):
                 tables = page.extract_tables()
+                if not tables:
+                    continue
                 for table in tables:
-                    if not table or len(table) < 2:
+                    if not table or len(table) < 1:
                         continue
-
-                    # Search for header in first few rows
                     for row_idx, row in enumerate(table):
-                        cleaned_row = [clean_cell(c).lower() for c in row if c]
-                        row_text = " ".join(cleaned_row)
+                        cleaned_row = [clean_cell(c) for c in row]
+                        row_lower = [c.lower() for c in cleaned_row]
 
-                        if any(k in row_text for k in ["invoice", "inv no", "gstin", "taxable", "total", "supplier"]):
-                            header = [clean_cell(c) for c in row]
-                            # Remaining rows are data rows
-                            for data_row in table[row_idx + 1:]:
-                                if any(data_row) and len(data_row) == len(header):
-                                    all_rows.append([clean_cell(c) for c in data_row])
-                            break
-                    if all_rows:
-                        break
-                if all_rows:
-                    break
+                        # Detect header row
+                        if "gstin" in row_lower and any("inv" in c or "invoice" in c for c in row_lower):
+                            header_indices = {}
+                            for idx, col_name in enumerate(row_lower):
+                                if "gstin" in col_name:
+                                    header_indices["gstin"] = idx
+                                elif "supplier" in col_name or "party" in col_name:
+                                    header_indices["supplier_name"] = idx
+                                elif "inv" in col_name or "invoice" in col_name:
+                                    header_indices["invoice_number"] = idx
+                                elif "date" in col_name:
+                                    header_indices["invoice_date"] = idx
+                                elif "taxable" in col_name:
+                                    header_indices["taxable_value"] = idx
+                                elif "rate" in col_name:
+                                    header_indices["rate"] = idx
+                                elif col_name == "cgst":
+                                    header_indices["cgst"] = idx
+                                elif col_name == "sgst":
+                                    header_indices["sgst"] = idx
+                                elif col_name == "igst":
+                                    header_indices["igst"] = idx
+                                elif "total tax" in col_name:
+                                    header_indices["total_tax"] = idx
+                            continue
 
-        if header and all_rows:
-            df = pd.DataFrame(all_rows, columns=header)
-            # Remove any empty or repeat header rows
-            df = df.dropna(how="all")
+                        if not header_indices:
+                            continue
+
+                        # Skip repeated header rows on later pages
+                        gstin_col_idx = header_indices.get("gstin", 1)
+                        if gstin_col_idx < len(cleaned_row) and cleaned_row[gstin_col_idx].lower() in ("gstin", "supplier gstin"):
+                            continue
+
+                        # Skip blank rows
+                        if not any(cleaned_row):
+                            continue
+
+                        # Check GSTIN - fail loudly if empty
+                        if gstin_col_idx >= len(cleaned_row) or not cleaned_row[gstin_col_idx].strip() or cleaned_row[gstin_col_idx].strip().lower() in ("none", "nan", ""):
+                            raise ValueError(f"GSTIN is empty in {source_type} at Page {page_idx + 1}, Row {row_idx + 1}")
+                        gstin = cleaned_row[gstin_col_idx].strip().upper()
+
+                        # Helper to parse and convert money using Decimal after removing commas
+                        def parse_money(field_key: str, required: bool = True) -> Decimal:
+                            idx = header_indices.get(field_key)
+                            if idx is None or idx >= len(cleaned_row):
+                                if required:
+                                    raise ValueError(f"{field_key} column missing in {source_type} at Page {page_idx + 1}")
+                                return Decimal("0.00")
+                            raw_val = cleaned_row[idx].replace(",", "").strip()
+                            if not raw_val:
+                                if required:
+                                    raise ValueError(f"{field_key} amount is empty in {source_type} at Page {page_idx + 1}, Row {row_idx + 1}")
+                                return Decimal("0.00")
+                            num_clean = re.sub(r"[^\d.]", "", raw_val)
+                            if not num_clean:
+                                if required:
+                                    raise ValueError(f"Invalid {field_key} amount '{cleaned_row[idx]}' in {source_type} at Page {page_idx + 1}, Row {row_idx + 1}")
+                                return Decimal("0.00")
+                            return Decimal(num_clean)
+
+                        taxable_val = parse_money("taxable_value", required=True)
+                        cgst_val = parse_money("cgst", required=False)
+                        sgst_val = parse_money("sgst", required=False)
+                        igst_val = parse_money("igst", required=False)
+                        total_tax_val = parse_money("total_tax", required=True)
+
+                        # Parse rate
+                        rate_idx = header_indices.get("rate")
+                        if rate_idx is not None and rate_idx < len(cleaned_row):
+                            rate_raw = cleaned_row[rate_idx].replace("%", "").strip()
+                            rate_clean = re.sub(r"[^\d.]", "", rate_raw)
+                            rate_val = float(Decimal(rate_clean)) if rate_clean else 18.0
+                        else:
+                            rate_val = 18.0
+
+                        supplier_idx = header_indices.get("supplier_name", 2)
+                        supplier_name = cleaned_row[supplier_idx].strip() if supplier_idx < len(cleaned_row) else "UNKNOWN"
+
+                        inv_idx = header_indices.get("invoice_number", 3)
+                        inv_num = cleaned_row[inv_idx].strip() if inv_idx < len(cleaned_row) else ""
+
+                        date_idx = header_indices.get("invoice_date", 4)
+                        inv_date = cleaned_row[date_idx].strip() if date_idx < len(cleaned_row) else ""
+
+                        total_amount = taxable_val + total_tax_val
+
+                        records.append({
+                            "gstin": gstin,
+                            "supplier_name": supplier_name,
+                            "invoice_number": inv_num,
+                            "invoice_date": inv_date,
+                            "taxable_value": float(taxable_val),
+                            "rate": rate_val,
+                            "cgst": float(cgst_val),
+                            "sgst": float(sgst_val),
+                            "igst": float(igst_val),
+                            "total_tax": float(total_tax_val),
+                            "total_amount": float(total_amount)
+                        })
+
+        if records:
+            df = pd.DataFrame(records)
+            print(f"Extracted {len(df)} rows from {source_type} PDF (expected: purchase register 41 rows, GSTR-2B 39 rows)")
+            logger.info(f"Extracted {len(df)} rows from {source_type} PDF across {page_idx + 1} pages.")
             return df
+    except ValueError as ve:
+        logger.error(f"Validation error extracting PDF tables: {ve}")
+        raise
     except Exception as e:
         logger.warning(f"pdfplumber table extraction failed: {e}")
 
@@ -178,7 +278,7 @@ def parse_pdf_to_dataframe(pdf_bytes: bytes, source_type: str = "PR") -> pd.Data
     stream = io.BytesIO(pdf_bytes)
 
     # Attempt 1: Extract structured tables
-    df = parse_tables_from_pdf(stream)
+    df = parse_tables_from_pdf(stream, source_type=source_type)
 
     # Attempt 2: If no table found, extract structured records from text
     if df is None or df.empty or len(df.columns) < 2:
