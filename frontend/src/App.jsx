@@ -40,8 +40,16 @@ const formatINR = (val) => {
   }).format(num);
 };
 
-// Base URL for API requests (supports local Vite proxy or deployed cloud backend)
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+// Base URL for API requests:
+// - Uses VITE_API_BASE_URL if explicitly defined
+// - If running on hosted cloud (Vercel/Netlify), automatically defaults to live Render backend
+// - If running locally, uses '' (Vite proxy to http://127.0.0.1:8000)
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ||
+  (typeof window !== 'undefined' && !['localhost', '127.0.0.1'].includes(window.location.hostname)
+    ? 'https://invoice-checker-7rnh.onrender.com'
+    : '')
+).replace(/\/+$/, '');
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('upload'); // 'upload' | 'dashboard' | 'review' | 'table'

@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "https://invoice-checker-7rnh.onrender.com/api/$1"
+    }
+  ]
+}
