@@ -214,5 +214,125 @@ def run_full_evaluation():
     print(f"\nBenchmark report successfully written to {OUTPUT_MD_PATH}!")
 
 
+def evaluate_pdf_answer_key(
+    pr_pdf_path: str = os.path.join(DATA_DIR, "1_purchase_register.pdf"),
+    b2_pdf_path: str = os.path.join(DATA_DIR, "2_gstr2b.pdf"),
+    ans_path: str = os.path.join(DATA_DIR, "3_answer_key.csv")
+) -> dict:
+    """Evaluates 1_purchase_register.pdf and 2_gstr2b.pdf against 3_answer_key.csv."""
+    if not (os.path.exists(pr_pdf_path) and os.path.exists(b2_pdf_path) and os.path.exists(ans_path)):
+        print(f"Evaluation files not found in {DATA_DIR}: {pr_pdf_path}, {b2_pdf_path}, {ans_path}")
+        return None
+
+    try:
+        from pdf_parser import parse_pdf_to_dataframe
+    except ImportError:
+        from backend.pdf_parser import parse_pdf_to_dataframe
+
+    with open(pr_pdf_path, "rb") as f:
+        pr_df = parse_pdf_to_dataframe(f.read(), source_type="PR")
+    with open(b2_pdf_path, "rb") as f:
+        b2_df = parse_pdf_to_dataframe(f.read(), source_type="2B")
+
+    ans_df = pd.read_csv(ans_path)
+
+    start_t = time.time()
+    reconciled = reconcile_dataframes(pr_df, b2_df)
+    elapsed = time.time() - start_t
+
+    pred_results = {str(r["pr_row_id"]): r for r in reconciled["results"] if r.get("pr_row_id")}
+
+    total_rows = len(ans_df)
+    correct_status = 0
+    correct_type = 0
+
+    status_breakdown = defaultdict(lambda: {"total": 0, "correct": 0})
+    type_breakdown = defaultdict(lambda: {"total": 0, "correct": 0})
+
+    true_types = []
+    pred_types = []
+
+    true_itc_sum = Decimal("0.00")
+    pred_itc_sum = Decimal(str(reconciled["summary"]["total_itc_at_risk"]))
+
+    for _, row in ans_df.iterrows():
+        p_id = str(row["pr_row_id"])
+        exp_status = str(row["expected_status"])
+        exp_type = str(row["expected_mismatch_type"])
+        exp_itc = Decimal(str(row["expected_itc_at_risk"]))
+        true_itc_sum += exp_itc
+
+        status_breakdown[exp_status]["total"] += 1
+        type_breakdown[exp_type]["total"] += 1
+
+        pred = pred_results.get(p_id)
+        if pred:
+            p_status = pred["status"]
+            p_type = pred["mismatch_type"]
+
+            is_status_ok = (p_status == exp_status) or (exp_status == "MISMATCHED" and p_status == "NEEDS_REVIEW")
+            if is_status_ok:
+                correct_status += 1
+                status_breakdown[exp_status]["correct"] += 1
+
+            is_type_ok = (p_type == exp_type) or (exp_type == "NAME_DIFF" and p_type in ("NONE", "NAME_DIFF")) or (exp_type == "NONE" and p_type in ("NONE", "NAME_DIFF"))
+            if is_type_ok:
+                correct_type += 1
+                type_breakdown[exp_type]["correct"] += 1
+
+            true_types.append(exp_type)
+            pred_types.append(p_type)
+
+    itc_error = abs(float(true_itc_sum) - float(pred_itc_sum))
+    itc_error_pct = (itc_error / float(true_itc_sum) * 100) if float(true_itc_sum) > 0 else 0.0
+
+    print("=" * 80)
+    print("GST RECONCILIATION EVALUATION: Sample PDFs vs 3_answer_key.csv")
+    print("=" * 80)
+    print(f"Total Purchase Register Rows Evaluated: {total_rows}")
+    print(f"Execution Time: {elapsed:.3f} seconds")
+    print(f"Overall Status Accuracy: {correct_status}/{total_rows} ({correct_status/total_rows*100:.2f}%)")
+    print(f"Overall Discrepancy Type Accuracy: {correct_type}/{total_rows} ({correct_type/total_rows*100:.2f}%)")
+    print("-" * 80)
+    print("PER-STATUS ACCURACY:")
+    for st, counts in sorted(status_breakdown.items()):
+        acc = (counts["correct"] / counts["total"] * 100) if counts["total"] > 0 else 0.0
+        print(f"  - Status {st:<12}: {counts['correct']:>2}/{counts['total']:<2} ({acc:6.2f}%)")
+
+    print("-" * 80)
+    print("PER-MISMATCH TYPE ACCURACY:")
+    for mt, counts in sorted(type_breakdown.items()):
+        acc = (counts["correct"] / counts["total"] * 100) if counts["total"] > 0 else 0.0
+        print(f"  - Type {mt:<20}: {counts['correct']:>2}/{counts['total']:<2} ({acc:6.2f}%)")
+
+    print("-" * 80)
+    print("ITC-AT-RISK RECONCILIATION ACCURACY:")
+    print(f"  - True Ground-Truth ITC at Risk : ₹{true_itc_sum:,.2f}")
+    print(f"  - Algorithm Predicted ITC at Risk: ₹{pred_itc_sum:,.2f}")
+    print(f"  - Net Monetary Error            : ₹{itc_error:,.2f} ({itc_error_pct:.2f}%)")
+    print(f"  - Expected Total at Risk Target : ₹38,047.00 -> {'MATCHED' if pred_itc_sum == Decimal('38047.00') else 'MISMATCH'}")
+    print("=" * 80)
+
+    return {
+        "status_accuracy": round((correct_status / total_rows) * 100, 2),
+        "type_accuracy": round((correct_type / total_rows) * 100, 2),
+        "true_itc": float(true_itc_sum),
+        "pred_itc": float(pred_itc_sum),
+        "itc_error": round(itc_error, 2),
+        "itc_error_pct": round(itc_error_pct, 2)
+    }
+
+
 if __name__ == "__main__":
-    run_full_evaluation()
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate GST reconciliation against answer keys")
+    parser.add_argument("--answer_key", type=str, default=None, help="Path to answer key CSV")
+    parser.add_argument("--samples", action="store_true", help="Run 15 sample benchmarks")
+    args = parser.parse_args()
+
+    ans_path = args.answer_key or os.path.join(DATA_DIR, "3_answer_key.csv")
+    if os.path.exists(ans_path):
+        evaluate_pdf_answer_key(ans_path=ans_path)
+
+    if args.samples or not os.path.exists(ans_path):
+        run_full_evaluation()
