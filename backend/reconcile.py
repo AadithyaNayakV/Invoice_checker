@@ -164,61 +164,81 @@ def find_top_candidates(pr_row: Dict[str, Any], gstr2b_df: pd.DataFrame, top_k: 
     - Uses rapidfuzz to score candidates based on invoice number and supplier name similarity.
     """
     gstin = pr_row["gstin"]
+def extract_month_period(date_str: Any) -> Optional[str]:
+    """Extracts YYYY-MM period from date string for tax period comparison."""
+    if not date_str:
+        return None
+    s = str(date_str).strip()
+    m = re.search(r"\b\d{1,2}[\/\-](\d{1,2})[\/\-](\d{4})\b", s)
+    if m:
+        return f"{int(m.group(2)):04d}-{int(m.group(1)):02d}"
+    m2 = re.search(r"\b(\d{4})[\/\-](\d{1,2})[\/\-]\d{1,2}\b", s)
+    if m2:
+        return f"{int(m2.group(1)):04d}-{int(m2.group(2)):02d}"
+    return None
+
+
+def find_top_candidates(pr_row: Dict[str, Any], gstr2b_df: pd.DataFrame, top_k: int = 3) -> List[Dict[str, Any]]:
+    """
+    Shortlists up to top_k candidate rows from GSTR-2B:
+    - Only sends rows to AI if GSTIN matches and candidate has similar invoice number or amount.
+    - Never pairs different invoice numbers just because dates are in different months.
+    - If no candidate qualifies, returns empty list.
+    """
+    gstin = pr_row["gstin"]
     pr_inv = pr_row["normalized_invoice_number"]
-    pr_name = pr_row["clean_name"]
     pr_amt = pr_row["total_amount"]
+    pr_name = pr_row["clean_name"]
 
-    # Block 1: Candidates with identical GSTIN
+    # Must match GSTIN
     pool = gstr2b_df[gstr2b_df["gstin"] == gstin]
-
-    # Block 2: If no same GSTIN, look for matching state code or similar name start
-    if pool.empty:
-        state_code = gstin[:2] if len(gstin) >= 2 else ""
-        name_prefix = pr_name[:3] if len(pr_name) >= 3 else ""
-        pool = gstr2b_df[
-            (gstr2b_df["gstin"].str.startswith(state_code)) |
-            (gstr2b_df["clean_name"].str.startswith(name_prefix))
-        ]
-
     if pool.empty:
         return []
 
     scored_candidates = []
     for _, cand in pool.iterrows():
         c_inv = cand["normalized_invoice_number"]
-        c_name = cand["clean_name"]
         c_amt = cand["total_amount"]
+        c_name = cand["clean_name"]
 
-        # Calculate similarity scores
-        name_score = fuzz.token_sort_ratio(pr_name, c_name)
+        # Calculate invoice similarity
         inv_score = fuzz.ratio(pr_inv, c_inv)
+        is_inv_similar = (inv_score >= 60) or (pr_inv and c_inv and (pr_inv in c_inv or c_inv in pr_inv))
 
-        # Proximity score for amounts
+        # Amount proximity
         amt_diff_pct = abs(pr_amt - c_amt) / max(pr_amt, 1.0)
-        amt_proximity = max(0, 100 - (amt_diff_pct * 100))
+        is_amt_similar = (amt_diff_pct <= 0.10)
 
-        # Combined weighted score
+        # Disallow pairing completely different invoice numbers unless amount is similar
+        if not (is_inv_similar or is_amt_similar):
+            continue
+
+        name_score = fuzz.token_sort_ratio(pr_name, c_name)
+        amt_proximity = max(0, 100 - (amt_diff_pct * 100))
         composite_score = (0.50 * inv_score) + (0.30 * name_score) + (0.20 * amt_proximity)
 
-        # Threshold to qualify as a reasonable candidate
-        if composite_score > 35 or inv_score > 60 or (gstin == cand["gstin"] and amt_proximity > 70):
-            cand_dict = cand.to_dict()
-            cand_dict["similarity_score"] = round(composite_score, 1)
-            scored_candidates.append(cand_dict)
+        cand_dict = cand.to_dict()
+        cand_dict["similarity_score"] = round(composite_score, 1)
+        scored_candidates.append(cand_dict)
 
-    # Sort descending by composite score
     scored_candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
     return scored_candidates[:top_k]
 
 
 def reconcile_dataframes(pr_df: pd.DataFrame, gstr2b_df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Main reconciliation pipeline:
-    1. Preprocesses and normalizes PR and GSTR-2B dataframes.
-    2. Vectorized exact match on (gstin + normalized_invoice_number + total_amount).
-    3. Blocked rapidfuzz candidate retrieval for unmatched records.
-    4. Batch Gemini AI / Heuristic evaluation with SQLite caching.
-    5. Python calculations for ITC at risk and status breakdown.
+    Main GST reconciliation pipeline:
+    1. Preprocesses and standardizes PR and GSTR-2B dataframes.
+    2. Matches on GSTIN + normalized invoice number first:
+       - Enforces one-to-one matching: each GSTR-2B row can be matched to only ONE purchase register row.
+       - If a second book row matches the same 2B row, marks DUPLICATE_IN_BOOKS.
+       - If same GSTIN and invoice but different amount or rate, marks AMOUNT_DIFF or RATE_MISMATCH.
+       - If same invoice but different month, marks WRONG_PERIOD.
+    3. For PR rows without exact GSTIN+invoice in 2B:
+       - Only sends to AI if GSTIN matches and candidate has similar invoice number or amount.
+       - If no candidate, marks MISSING_IN_2B.
+    4. Reports rows that are in GSTR-2B but not in the books as EXTRA_IN_2B (0 ITC at risk).
+    5. Calculates ITC at risk: sum of total tax for problem rows.
     """
     start_time = time.time()
     logger.info("Starting GST Reconciliation pipeline...")
@@ -229,79 +249,158 @@ def reconcile_dataframes(pr_df: pd.DataFrame, gstr2b_df: pd.DataFrame) -> Dict[s
     gstr2b_clean = standardize_columns(gstr2b_df, source_type="2B")
     logger.info(f"Stage 1 (Data Preprocessing) completed in {time.time() - t0:.3f}s. PR: {len(pr_clean)}, 2B: {len(gstr2b_clean)} rows.")
 
-    # Stage 2: Vectorized Exact Match
+    # Stage 2: 1-to-1 match on GSTIN + normalized invoice number first
     t0 = time.time()
-    # Create exact match keys
-    pr_clean["amount_key"] = pr_clean["total_amount"].apply(lambda x: f"{x:.2f}")
-    gstr2b_clean["amount_key"] = gstr2b_clean["total_amount"].apply(lambda x: f"{x:.2f}")
+    matched_2b_ids = set()
+    b2_by_gstin_inv = {}
+    for _, b2_row in gstr2b_clean.iterrows():
+        key = (b2_row["gstin"], b2_row["normalized_invoice_number"])
+        b2_by_gstin_inv.setdefault(key, []).append(b2_row.to_dict())
 
-    # Identify exact matches via merge
-    merge_cols = ["gstin", "normalized_invoice_number", "amount_key"]
-    # Drop duplicates on merge keys in 2B for 1-to-1 match
-    gstr2b_dedup = gstr2b_clean.drop_duplicates(subset=merge_cols, keep="first")
-
-    exact_matched = pr_clean.merge(
-        gstr2b_dedup[merge_cols + ["id", "invoice_number", "total_amount", "total_tax", "invoice_date"]],
-        on=merge_cols,
-        how="inner",
-        suffixes=("", "_2b")
-    )
-
-    matched_pr_ids = set(exact_matched["id"].tolist())
-    matched_2b_ids = set(exact_matched["id_2b"].tolist())
-
-    logger.info(f"Stage 2 (Vectorized Exact Match) found {len(matched_pr_ids)} exact matches in {time.time() - t0:.3f}s.")
-
-    # Build output records for exact matches
     results = []
-    for _, row in exact_matched.iterrows():
-        results.append({
-            "id": row["id"],
-            "pr_row_id": row["id"],
-            "candidate_2b_id": row["id_2b"],
-            "gstin": row["gstin"],
-            "supplier_name": row["supplier_name"],
-            "invoice_number": row["invoice_number"],
-            "invoice_date": row["invoice_date"],
-            "taxable_value": row["taxable_value"],
-            "total_tax": row["total_tax"],
-            "total_amount": row["total_amount"],
-            "b2_invoice_number": row["invoice_number_2b"],
-            "b2_amount": row["total_amount_2b"],
-            "b2_tax": row["total_tax_2b"],
-            "b2_date": row["invoice_date_2b"],
-            "status": "MATCHED",
-            "mismatch_type": "NONE",
-            "confidence": 100,
-            "itc_at_risk": 0.0,
-            "reason": "Exact match on GSTIN, normalized invoice number, and total amount."
-        })
+    unmatched_pr = []
+
+    for _, pr_row in pr_clean.iterrows():
+        p_dict = pr_row.to_dict()
+        key = (p_dict["gstin"], p_dict["normalized_invoice_number"])
+        candidates = b2_by_gstin_inv.get(key, [])
+
+        unmatched_cand = None
+        already_matched_cand = None
+        for c in candidates:
+            if c["id"] not in matched_2b_ids:
+                unmatched_cand = c
+                break
+            else:
+                already_matched_cand = c
+
+        if unmatched_cand:
+            # One-to-one match
+            c = unmatched_cand
+            matched_2b_ids.add(c["id"])
+
+            pr_tax = round_curr(p_dict["total_tax"])
+            b2_tax = round_curr(c["total_tax"])
+            pr_val = round_curr(p_dict["taxable_value"])
+            b2_val = round_curr(c["taxable_value"])
+            pr_amt = round_curr(p_dict["total_amount"])
+            b2_amt = round_curr(c["total_amount"])
+            pr_rate = float(p_dict["rate"])
+            b2_rate = float(c["rate"])
+
+            pr_period = extract_month_period(p_dict["invoice_date"])
+            b2_period = extract_month_period(c["invoice_date"])
+
+            # Hierarchy of discrepancy detection:
+            # 1. Rate mismatch
+            if abs(pr_rate - b2_rate) > 0.01:
+                status = "MISMATCHED"
+                mismatch_type = "RATE_MISMATCH"
+                itc_risk = pr_tax
+                reason = f"GST rate mismatch: {pr_rate:.0f}% in books vs {b2_rate:.0f}% in GSTR-2B."
+                confidence = 100
+            # 2. Amount difference (taxable value or total amount diff > 1.0)
+            elif abs(pr_val - b2_val) > 1.0 or abs(pr_amt - b2_amt) > 1.0:
+                status = "MISMATCHED"
+                mismatch_type = "AMOUNT_DIFF"
+                itc_risk = pr_tax
+                reason = f"Amount difference: Taxable ₹{pr_val:,.2f} in books vs ₹{b2_val:,.2f} in GSTR-2B."
+                confidence = 100
+            # 3. Wrong period (different month)
+            elif pr_period and b2_period and pr_period != b2_period:
+                status = "MISMATCHED"
+                mismatch_type = "WRONG_PERIOD"
+                itc_risk = pr_tax
+                reason = f"Invoice dated in different tax month: {p_dict['invoice_date']} in books vs {c['invoice_date']} in GSTR-2B."
+                confidence = 100
+            # 4. Supplier legal name difference
+            elif p_dict["clean_name"] != c["clean_name"]:
+                status = "MATCHED"
+                mismatch_type = "NAME_DIFF"
+                itc_risk = 0.0
+                reason = "Minor supplier name spelling variation; valid match."
+                confidence = 95
+            else:
+                status = "MATCHED"
+                mismatch_type = "NONE"
+                itc_risk = 0.0
+                reason = "Exact match on GSTIN, normalized invoice number, and tax amount."
+                confidence = 100
+
+            results.append({
+                "id": p_dict["id"],
+                "pr_row_id": p_dict["id"],
+                "candidate_2b_id": c["id"],
+                "gstin": p_dict["gstin"],
+                "supplier_name": p_dict["supplier_name"],
+                "invoice_number": p_dict["invoice_number"],
+                "invoice_date": p_dict["invoice_date"],
+                "taxable_value": pr_val,
+                "total_tax": pr_tax,
+                "total_amount": pr_amt,
+                "b2_invoice_number": c["invoice_number"],
+                "b2_amount": b2_amt,
+                "b2_tax": b2_tax,
+                "b2_date": c["invoice_date"],
+                "status": status,
+                "mismatch_type": mismatch_type,
+                "confidence": confidence,
+                "itc_at_risk": itc_risk,
+                "reason": reason
+            })
+        elif already_matched_cand:
+            # Second book row matches the same 2B row -> DUPLICATE_IN_BOOKS
+            c = already_matched_cand
+            pr_tax = round_curr(p_dict["total_tax"])
+            results.append({
+                "id": p_dict["id"],
+                "pr_row_id": p_dict["id"],
+                "candidate_2b_id": c["id"],
+                "gstin": p_dict["gstin"],
+                "supplier_name": p_dict["supplier_name"],
+                "invoice_number": p_dict["invoice_number"],
+                "invoice_date": p_dict["invoice_date"],
+                "taxable_value": round_curr(p_dict["taxable_value"]),
+                "total_tax": pr_tax,
+                "total_amount": round_curr(p_dict["total_amount"]),
+                "b2_invoice_number": c["invoice_number"],
+                "b2_amount": round_curr(c["total_amount"]),
+                "b2_tax": round_curr(c["total_tax"]),
+                "b2_date": c["invoice_date"],
+                "status": "MISMATCHED",
+                "mismatch_type": "DUPLICATE_IN_BOOKS",
+                "confidence": 100,
+                "itc_at_risk": pr_tax,
+                "reason": "Duplicate invoice found in purchase register; GSTR-2B row already matched."
+            })
+        else:
+            unmatched_pr.append(p_dict)
+
+    logger.info(f"Stage 2 completed in {time.time() - t0:.3f}s. Remaining unmatched PR rows: {len(unmatched_pr)}")
 
     # Stage 3: Candidate retrieval for unmatched PR rows
     t0 = time.time()
-    unmatched_pr = pr_clean[~pr_clean["id"].isin(matched_pr_ids)]
     unmatched_2b = gstr2b_clean[~gstr2b_clean["id"].isin(matched_2b_ids)]
 
-    logger.info(f"Stage 3: Shortlisting candidates for {len(unmatched_pr)} unmatched PR rows against {len(unmatched_2b)} 2B rows...")
-
     batch_ai_payload = []
-    unmatched_index_map = []  # Maps payload index back to PR row
+    unmatched_index_map = []
 
-    for _, pr_row in unmatched_pr.iterrows():
-        candidates = find_top_candidates(pr_row.to_dict(), unmatched_2b, top_k=3)
+    for p_dict in unmatched_pr:
+        candidates = find_top_candidates(p_dict, unmatched_2b, top_k=3)
         if not candidates:
             # Immediate MISSING_IN_2B without calling AI
+            pr_tax = round_curr(p_dict["total_tax"])
             results.append({
-                "id": pr_row["id"],
-                "pr_row_id": pr_row["id"],
+                "id": p_dict["id"],
+                "pr_row_id": p_dict["id"],
                 "candidate_2b_id": None,
-                "gstin": pr_row["gstin"],
-                "supplier_name": pr_row["supplier_name"],
-                "invoice_number": pr_row["invoice_number"],
-                "invoice_date": pr_row["invoice_date"],
-                "taxable_value": pr_row["taxable_value"],
-                "total_tax": pr_row["total_tax"],
-                "total_amount": pr_row["total_amount"],
+                "gstin": p_dict["gstin"],
+                "supplier_name": p_dict["supplier_name"],
+                "invoice_number": p_dict["invoice_number"],
+                "invoice_date": p_dict["invoice_date"],
+                "taxable_value": round_curr(p_dict["taxable_value"]),
+                "total_tax": pr_tax,
+                "total_amount": round_curr(p_dict["total_amount"]),
                 "b2_invoice_number": "-",
                 "b2_amount": 0.0,
                 "b2_tax": 0.0,
@@ -309,71 +408,64 @@ def reconcile_dataframes(pr_df: pd.DataFrame, gstr2b_df: pd.DataFrame) -> Dict[s
                 "status": "MISMATCHED",
                 "mismatch_type": "MISSING_IN_2B",
                 "confidence": 95,
-                "itc_at_risk": round_curr(pr_row["total_tax"]),
+                "itc_at_risk": pr_tax,
                 "reason": "Invoice missing in supplier GSTR-2B portal records. ITC cannot be claimed."
             })
         else:
             batch_ai_payload.append({
-                "query": pr_row.to_dict(),
+                "query": p_dict,
                 "candidates": candidates
             })
-            unmatched_index_map.append((pr_row.to_dict(), candidates))
+            unmatched_index_map.append((p_dict, candidates))
 
     logger.info(f"Stage 3 completed in {time.time() - t0:.3f}s. {len(batch_ai_payload)} rows sent to AI matcher.")
 
-    # Stage 4: Batch AI Reconciliation
+    # Stage 4: Batch AI / Heuristic Reconciliation
     if batch_ai_payload:
         t0 = time.time()
         ai_decisions = match_unmatched_batch(batch_ai_payload)
         logger.info(f"Stage 4 (AI / Heuristic Reconciliation) finished in {time.time() - t0:.3f}s.")
 
-        # Process AI decisions and perform strict Python financial calculations
-        for (pr_row_dict, candidates), decision in zip(unmatched_index_map, ai_decisions):
+        for (p_dict, candidates), decision in zip(unmatched_index_map, ai_decisions):
             conf = int(decision.get("confidence", 50))
             mismatch_type = decision.get("mismatch_type", "NEEDS_REVIEW")
             reason = decision.get("reason", "")
             cand_id = decision.get("best_candidate_id")
 
-            # Find matching candidate row if any
             cand_row = next((c for c in candidates if str(c.get("id")) == str(cand_id)), None) if cand_id else None
+            if cand_row and cand_row["id"] not in matched_2b_ids:
+                matched_2b_ids.add(cand_row["id"])
 
-            pr_tax = round_curr(pr_row_dict["total_tax"])
+            pr_tax = round_curr(p_dict["total_tax"])
             b2_tax = round_curr(cand_row["total_tax"]) if cand_row else 0.0
             b2_amt = round_curr(cand_row["total_amount"]) if cand_row else 0.0
             b2_inv = cand_row["invoice_number"] if cand_row else "-"
             b2_date = cand_row["invoice_date"] if cand_row else "-"
 
-            # Rule 8: If confidence is below 80, status = "NEEDS_REVIEW"
             if conf < 80:
                 status = "NEEDS_REVIEW"
-                itc_risk = pr_tax  # Until reviewed, credit is at risk
+                itc_risk = pr_tax
             elif mismatch_type == "NONE" and decision.get("same_invoice"):
+                status = "MATCHED"
+                itc_risk = 0.0
+            elif mismatch_type == "NAME_DIFF":
                 status = "MATCHED"
                 itc_risk = 0.0
             else:
                 status = "MISMATCHED"
-                if mismatch_type == "MISSING_IN_2B":
-                    itc_risk = pr_tax
-                elif mismatch_type in ("RATE_MISMATCH", "AMOUNT_DIFF"):
-                    # Discrepancy amount in tax
-                    itc_risk = round_curr(max(0.0, pr_tax - b2_tax)) if b2_tax > 0 else pr_tax
-                elif mismatch_type == "DATE_PERIOD":
-                    # Timing difference; tax is delayed or blocked for current period
-                    itc_risk = pr_tax
-                else:
-                    itc_risk = 0.0 if mismatch_type == "NAME_DIFF" else pr_tax
+                itc_risk = pr_tax
 
             results.append({
-                "id": pr_row_dict["id"],
-                "pr_row_id": pr_row_dict["id"],
+                "id": p_dict["id"],
+                "pr_row_id": p_dict["id"],
                 "candidate_2b_id": cand_id,
-                "gstin": pr_row_dict["gstin"],
-                "supplier_name": pr_row_dict["supplier_name"],
-                "invoice_number": pr_row_dict["invoice_number"],
-                "invoice_date": pr_row_dict["invoice_date"],
-                "taxable_value": pr_row_dict["taxable_value"],
+                "gstin": p_dict["gstin"],
+                "supplier_name": p_dict["supplier_name"],
+                "invoice_number": p_dict["invoice_number"],
+                "invoice_date": p_dict["invoice_date"],
+                "taxable_value": round_curr(p_dict["taxable_value"]),
                 "total_tax": pr_tax,
-                "total_amount": round_curr(pr_row_dict["total_amount"]),
+                "total_amount": round_curr(p_dict["total_amount"]),
                 "b2_invoice_number": b2_inv,
                 "b2_amount": b2_amt,
                 "b2_tax": b2_tax,
@@ -385,11 +477,36 @@ def reconcile_dataframes(pr_df: pd.DataFrame, gstr2b_df: pd.DataFrame) -> Dict[s
                 "reason": reason
             })
 
-    # Stage 5: Financial calculations (using Python Decimal / rounding, NEVER AI)
+    # Stage 5: Report rows that are in GSTR-2B but not in the books as EXTRA_IN_2B
+    for _, b2_row in gstr2b_clean.iterrows():
+        if b2_row["id"] not in matched_2b_ids:
+            results.append({
+                "id": f"2B_{b2_row['id']}",
+                "pr_row_id": None,
+                "candidate_2b_id": b2_row["id"],
+                "gstin": b2_row["gstin"],
+                "supplier_name": b2_row["supplier_name"],
+                "invoice_number": "-",
+                "invoice_date": "-",
+                "taxable_value": 0.0,
+                "total_tax": 0.0,
+                "total_amount": 0.0,
+                "b2_invoice_number": b2_row["invoice_number"],
+                "b2_amount": round_curr(b2_row["total_amount"]),
+                "b2_tax": round_curr(b2_row["total_tax"]),
+                "b2_date": b2_row["invoice_date"],
+                "status": "MISMATCHED",
+                "mismatch_type": "EXTRA_IN_2B",
+                "confidence": 100,
+                "itc_at_risk": 0.0,
+                "reason": "Invoice present in GSTR-2B portal but missing in purchase register (please check)."
+            })
+
+    # Stage 6: Financial calculations
     t0 = time.time()
     summary = calculate_financial_summary(results)
     total_elapsed = time.time() - start_time
-    logger.info(f"Stage 5 (Summary & Totals) finished in {time.time() - t0:.3f}s. Total pipeline time: {total_elapsed:.3f}s.")
+    logger.info(f"Stage 6 (Summary & Totals) finished in {time.time() - t0:.3f}s. Total pipeline time: {total_elapsed:.3f}s.")
 
     return {
         "summary": summary,
@@ -401,7 +518,8 @@ def reconcile_dataframes(pr_df: pd.DataFrame, gstr2b_df: pd.DataFrame) -> Dict[s
 def calculate_financial_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Calculates summary metrics:
-    - total_itc_at_risk (₹): sum of tax of all problem rows
+    - total_itc_at_risk (₹): Python sum of total tax for MISSING_IN_2B, AMOUNT_DIFF, RATE_MISMATCH, DUPLICATE_IN_BOOKS, WRONG_PERIOD.
+      Not for NAME_DIFF, invoice-format differences, or EXTRA_IN_2B.
     - total_records
     - counts by status: MATCHED, MISMATCHED, NEEDS_REVIEW
     - counts by mismatch_type
@@ -420,7 +538,12 @@ def calculate_financial_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]
         m_type = row.get("mismatch_type", "UNKNOWN")
         type_counts[m_type] = type_counts.get(m_type, 0) + 1
 
-        risk_val = Decimal(str(row.get("itc_at_risk", 0.0) or 0.0))
+        # Only sum ITC at risk for discrepancy problem types, never for EXTRA_IN_2B, NAME_DIFF, or format differences (NONE)
+        if m_type in ("MISSING_IN_2B", "AMOUNT_DIFF", "RATE_MISMATCH", "DUPLICATE_IN_BOOKS", "WRONG_PERIOD", "NEEDS_REVIEW"):
+            risk_val = Decimal(str(row.get("itc_at_risk", 0.0) or 0.0))
+        else:
+            risk_val = Decimal("0.00")
+
         total_itc_risk += risk_val
 
         supplier = row.get("supplier_name", "UNKNOWN")
@@ -451,5 +574,5 @@ def calculate_financial_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]
         "total_itc_at_risk": float(total_itc_risk.quantize(Decimal("0.01"))),
         "status_counts": status_counts,
         "mismatch_counts": type_counts,
-        "itc_by_supplier": supplier_list[:10]  # Top 10 for bar chart
+        "itc_by_supplier": supplier_list[:10]
     }
