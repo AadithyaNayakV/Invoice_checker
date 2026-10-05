@@ -40,6 +40,9 @@ const formatINR = (val) => {
   }).format(num);
 };
 
+// Base URL for API requests (supports local Vite proxy or deployed cloud backend)
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('upload'); // 'upload' | 'dashboard' | 'review' | 'table'
   const [filePR, setFilePR] = useState(null);
@@ -79,7 +82,7 @@ export default function App() {
       setTimeout(() => setLoadingStep('Extracting tables & running vectorized exact matching...'), 350);
       setTimeout(() => setLoadingStep('Evaluating discrepancy candidates & computing ITC at risk...'), 800);
 
-      const res = await fetch('/api/reconcile', {
+      const res = await fetch(`${API_BASE_URL}/api/reconcile`, {
         method: 'POST',
         body: formData,
       });
@@ -109,7 +112,7 @@ export default function App() {
   // Human Review Queue Action (Approve / Reject)
   const handleReviewAction = async (rowId, action) => {
     try {
-      const res = await fetch('/api/review', {
+      const res = await fetch(`${API_BASE_URL}/api/review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -139,7 +142,7 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch('/api/export', {
+      const res = await fetch(`${API_BASE_URL}/api/export`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(results),
