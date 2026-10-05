@@ -51,30 +51,21 @@ def clean_supplier_name(name: Any) -> str:
 
 def normalize_invoice_number(inv: Any) -> str:
     """
-    Normalizes invoice numbers across different ERP formats:
-    - Strips prefixes like 'INV/', 'INV-', 'BILL/'
-    - Removes slashes, dashes, spaces, special chars
-    - Strips leading zeros from numeric components (e.g., 'INV/23-24/0045' -> '232445', '45' -> '45')
+    Normalizes invoice numbers by extracting only the LAST numeric component:
+    - INV/24-25/0043 -> 43
+    - 0043 -> 43
+    - 43 -> 43
+    Does not join the financial-year digits.
     """
     if pd.isna(inv) or inv is None:
         return ""
-    raw = str(inv).strip().upper()
-    # Remove common prefix tokens
-    raw = re.sub(r"^(INV|BILL|TAX|EXP|INVOICE)[\/\-_:\s]*", "", raw)
-    if not raw:
+    s = str(inv).strip()
+    if not s:
         return ""
-    # Split by separators
-    parts = [p for p in re.split(r"[\/\-_:\s\.]+", raw) if p]
-    if not parts:
-        return ""
-
-    norm_parts = []
-    for p in parts:
-        if p.isdigit():
-            norm_parts.append(p.lstrip("0") or "0")
-        else:
-            norm_parts.append(re.sub(r"^0+", "", p) or "0")
-    return "".join(norm_parts)
+    digits = re.findall(r"\d+", s)
+    if digits:
+        return str(int(digits[-1]))
+    return s.upper()
 
 
 

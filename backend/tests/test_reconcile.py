@@ -29,12 +29,14 @@ class TestNormalization:
         assert clean_supplier_name(None) == ""
 
     def test_normalize_invoice_number(self):
-        # Suffix/prefix handling and leading zeros
-        assert normalize_invoice_number("INV/23-24/0045") == "232445"
+        # Extracts only the last number part, without joining financial year digits
+        assert normalize_invoice_number("INV/24-25/0043") == "43"
+        assert normalize_invoice_number("INV/23-24/0045") == "45"
         assert normalize_invoice_number("INV-0012") == "12"
-        assert normalize_invoice_number("45") == "45"
+        assert normalize_invoice_number("43") == "43"
+        assert normalize_invoice_number("0043") == "43"
         assert normalize_invoice_number("00045") == "45"
-        assert normalize_invoice_number("BILL/2023/99") == "202399"
+        assert normalize_invoice_number("BILL/2023/99") == "99"
         assert normalize_invoice_number("0") == "0"
         assert normalize_invoice_number("") == ""
 
