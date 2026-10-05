@@ -182,7 +182,7 @@ export default function App() {
   const BAR_COLORS = ['#dc2626', '#ea580c', '#d97706', '#2563eb', '#7c3aed', '#059669'];
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans">
+    <div className="min-h-screen bg-white text-slate-900 flex flex-col font-sans">
       {/* Top Navigation Bar (Full Width Light Theme) */}
       <header className="border-b border-slate-200 bg-white sticky top-0 z-40 shadow-sm">
         <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12 h-16 flex items-center justify-between">
@@ -279,7 +279,7 @@ export default function App() {
       </header>
 
       {/* Main Full-Width Content Container */}
-      <main className="flex-1 w-full px-4 sm:px-6 lg:px-8 xl:px-12 py-6">
+      <main className="flex-1 w-full bg-white px-4 sm:px-6 lg:px-8 xl:px-12 py-6">
         {/* Error notification banner */}
         {errorMsg && (
           <div className="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-800 flex items-start space-x-3 shadow-sm">
@@ -524,14 +524,16 @@ export default function App() {
               <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                 Discrepancy Category Breakdown
               </h3>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
                 {[
                   { key: 'NONE', label: 'Exact / Normalized', color: 'text-emerald-700' },
                   { key: 'MISSING_IN_2B', label: 'Missing in GSTR-2B', color: 'text-rose-700' },
                   { key: 'AMOUNT_DIFF', label: 'Amount Discrepancy', color: 'text-amber-700' },
-                  { key: 'RATE_MISMATCH', label: 'Tax Rate Mismatch', color: 'text-red-700' },
-                  { key: 'NAME_DIFF', label: 'Vendor Name Variation', color: 'text-blue-700' },
-                  { key: 'DATE_PERIOD', label: 'Period Shift', color: 'text-purple-700' },
+                  { key: 'RATE_MISMATCH', label: 'Rate Mismatch', color: 'text-red-700' },
+                  { key: 'DUPLICATE_IN_BOOKS', label: 'Duplicate in Books', color: 'text-orange-700' },
+                  { key: 'WRONG_PERIOD', label: 'Wrong Period Shift', color: 'text-purple-700' },
+                  { key: 'EXTRA_IN_2B', label: 'Extra in GSTR-2B', color: 'text-teal-700' },
+                  { key: 'NAME_DIFF', label: 'Name Variation', color: 'text-blue-700' },
                 ].map((item) => {
                   const count = summary.mismatch_counts?.[item.key] || 0;
                   return (
@@ -541,7 +543,7 @@ export default function App() {
                         setTypeFilter(item.key);
                         setActiveTab('table');
                       }}
-                      className="cursor-pointer bg-slate-50 hover:bg-slate-100 p-3 rounded-xl border border-slate-200 transition shadow-sm"
+                      className="cursor-pointer bg-white hover:bg-slate-50 p-3 rounded-xl border border-slate-200 hover:border-slate-300 transition shadow-sm"
                     >
                       <div className="text-xs text-slate-500 font-medium truncate">{item.label}</div>
                       <div className={`text-lg font-extrabold mt-1 ${item.color}`}>{count}</div>
@@ -714,7 +716,7 @@ export default function App() {
                       </div>
 
                       {/* Right: GSTR-2B Candidate */}
-                      <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2">
+                      <div className="bg-teal-50/40 p-4 rounded-xl border border-teal-200 space-y-2">
                         <div className="text-xs font-bold text-teal-800 flex items-center space-x-1">
                           <FileSpreadsheet className="w-3.5 h-3.5" />
                           <span>GSTR-2B Supplier Filing</span>
@@ -788,7 +790,7 @@ export default function App() {
                   placeholder="Search by supplier name, GSTIN, invoice #..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-9 pr-4 py-2 text-xs sm:text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  className="w-full bg-white border border-slate-300 rounded-xl pl-9 pr-4 py-2 text-xs sm:text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
               </div>
 
@@ -798,7 +800,7 @@ export default function App() {
                 <select
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
-                  className="bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+                  className="bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
                 >
                   <option value="ALL">All Statuses</option>
                   <option value="MATCHED">Matched</option>
@@ -813,15 +815,17 @@ export default function App() {
                 <select
                   value={typeFilter}
                   onChange={(e) => setTypeFilter(e.target.value)}
-                  className="bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+                  className="bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
                 >
                   <option value="ALL">All Types</option>
-                  <option value="NONE">NONE (Exact/Normalized)</option>
-                  <option value="NAME_DIFF">NAME_DIFF (Name variation)</option>
-                  <option value="AMOUNT_DIFF">AMOUNT_DIFF (Value drift)</option>
-                  <option value="RATE_MISMATCH">RATE_MISMATCH (Tax rate)</option>
-                  <option value="DATE_PERIOD">DATE_PERIOD (Month shift)</option>
-                  <option value="MISSING_IN_2B">MISSING_IN_2B (Unfiled)</option>
+                  <option value="NONE">NONE (Exact / Normalized)</option>
+                  <option value="DUPLICATE_IN_BOOKS">DUPLICATE_IN_BOOKS (Duplicate in Books)</option>
+                  <option value="AMOUNT_DIFF">AMOUNT_DIFF (Value Mismatch)</option>
+                  <option value="RATE_MISMATCH">RATE_MISMATCH (Tax Rate Mismatch)</option>
+                  <option value="WRONG_PERIOD">WRONG_PERIOD (Different Month)</option>
+                  <option value="EXTRA_IN_2B">EXTRA_IN_2B (Filed but Not in Books)</option>
+                  <option value="MISSING_IN_2B">MISSING_IN_2B (Unfiled by Vendor)</option>
+                  <option value="NAME_DIFF">NAME_DIFF (Name Variation)</option>
                 </select>
               </div>
 
